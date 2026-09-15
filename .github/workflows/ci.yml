@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONFIGURE_DEPS: Alien::Build Alien::Build::MM Alien::Base::Wrapper ExtUtils::CBuilder
+  ALIEN: https://github.com/vividsnow/perl5-alien-ghostty/archive/refs/heads/master.tar.gz
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - perl: '5.10'
+          - perl: '5.22'
+          - perl: '5.40'
+            disttest: true
+          - perl: '5.40'
+            threads: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          multi-thread: ${{ matrix.threads || false }}
+      - run: |
+          perl -MConfig -e 'exit(($Config{useithreads} ? 1 : 0) != ("${{ matrix.threads }}" eq "true" ? 1 : 0))'
+      - run: cpanm -nq $CONFIGURE_DEPS
+      - run: cpanm -nq Alien::ghostty || cpanm $ALIEN || { cat ~/.cpanm/build.log; exit 1; }
+      - run: perl Makefile.PL
+      - run: cpanm -nq --installdeps .
+      - if: matrix.disttest
+        run: |
+          make distcheck 2>&1 | tee "$RUNNER_TEMP/distcheck.log"
+          if grep -E 'No such file|Not in MANIFEST' "$RUNNER_TEMP/distcheck.log"; then exit 1; fi
+          make disttest
+          cpanm -nq IO::Pty
+          make
+          for f in examples/*.pl; do perl -Mblib -wc "$f" || exit 1; done
+      - if: '!matrix.disttest'
+        run: make test
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.40'
+      - run: cpanm -nq $CONFIGURE_DEPS
+      - run: cpanm -nq Alien::ghostty || cpanm $ALIEN || { cat ~/.cpanm/build.log; exit 1; }
+      - run: perl Makefile.PL
+      - run: cpanm -nq --installdeps .
+      - run: make test
+
+  alpine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: alpine:latest
+    steps:
+      - run: apk add --no-cache perl perl-dev perl-app-cpanminus perl-io-socket-ssl perl-net-ssleay perl-uri make gcc musl-dev linux-headers tar xz pkgconf
+      - uses: actions/checkout@v7
+      - run: cpanm -nq $CONFIGURE_DEPS
+      - run: cpanm -nq Alien::ghostty || cpanm $ALIEN || { cat ~/.cpanm/build.log; exit 1; }
+      - run: perl Makefile.PL
+      - run: cpanm -nq --installdeps .
+      - run: make test
+
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y perl5 p5-App-cpanminus p5-IO-Socket-SSL p5-Net-SSLeay p5-Mozilla-CA p5-URI gmake pkgconf
+          run: |
+            cpanm -nq Alien::Build Alien::Build::MM Alien::Base::Wrapper ExtUtils::CBuilder
+            cpanm -nq Alien::ghostty || cpanm https://github.com/vividsnow/perl5-alien-ghostty/archive/refs/heads/master.tar.gz || { cat ~/.cpanm/build.log; exit 1; }
+            perl Makefile.PL
+            cpanm -nq --installdeps .
+            gmake test
